@@ -1,0 +1,254 @@
+{
+  "info": {
+    "name": "Receiver File Manager API",
+    "description": "Postman collection for Receiver. Set base_url, username, and password collection variables before running requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080" },
+    { "key": "username", "value": "admin" },
+    { "key": "password", "value": "admin" },
+    { "key": "upload_id", "value": "" },
+    { "key": "trash_id", "value": "" }
+  ],
+  "auth": {
+    "type": "basic",
+    "basic": [
+      { "key": "username", "value": "{{username}}", "type": "string" },
+      { "key": "password", "value": "{{password}}", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": "{{base_url}}/api/login"
+          }
+        },
+        {
+          "name": "Current User",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/me"
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/logout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Files",
+      "item": [
+        {
+          "name": "List Files",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/files?path=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "files"],
+              "query": [{ "key": "path", "value": "" }]
+            }
+          }
+        },
+        {
+          "name": "Create Folder",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/folders?path=docs&force=1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "folders"],
+              "query": [
+                { "key": "path", "value": "docs" },
+                { "key": "force", "value": "1" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/search?q=report&path=",
+              "host": ["{{base_url}}"],
+              "path": ["api", "search"],
+              "query": [
+                { "key": "q", "value": "report" },
+                { "key": "path", "value": "" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Download File or Folder",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/files/download?path=docs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "files", "download"],
+              "query": [{ "key": "path", "value": "docs" }]
+            }
+          }
+        },
+        {
+          "name": "Delete File or Folder",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/api/files?path=docs",
+              "host": ["{{base_url}}"],
+              "path": ["api", "files"],
+              "query": [{ "key": "path", "value": "docs" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Chunk Upload",
+      "item": [
+        {
+          "name": "Create Upload Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.upload_id) pm.collectionVariables.set('upload_id', data.upload_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"path\": \"docs\",\n  \"filename\": \"hello.txt\",\n  \"total_size\": 11,\n  \"chunk_size\": 5242880,\n  \"force\": true,\n  \"max_width\": null,\n  \"max_height\": null\n}"
+            },
+            "url": "{{base_url}}/api/uploads"
+          }
+        },
+        {
+          "name": "Upload Chunk 0",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/octet-stream" }],
+            "body": {
+              "mode": "raw",
+              "raw": "hello world"
+            },
+            "url": "{{base_url}}/api/uploads/{{upload_id}}/chunks/0"
+          }
+        },
+        {
+          "name": "Upload Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/uploads/{{upload_id}}"
+          }
+        },
+        {
+          "name": "Complete Upload",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/uploads/{{upload_id}}/complete"
+          }
+        },
+        {
+          "name": "Cancel Upload",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/api/uploads/{{upload_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Settings and Trash",
+      "item": [
+        {
+          "name": "Get Settings",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/settings"
+          }
+        },
+        {
+          "name": "Update Settings",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trash_enabled\": true\n}"
+            },
+            "url": "{{base_url}}/api/settings"
+          }
+        },
+        {
+          "name": "List Trash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data.items && data.items[0]) pm.collectionVariables.set('trash_id', data.items[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/trash"
+          }
+        },
+        {
+          "name": "Restore Trash Item",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{trash_id}}\"\n}"
+            },
+            "url": "{{base_url}}/api/trash/restore"
+          }
+        },
+        {
+          "name": "Delete Trash Item Permanently",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/api/trash?id={{trash_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "trash"],
+              "query": [{ "key": "id", "value": "{{trash_id}}" }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

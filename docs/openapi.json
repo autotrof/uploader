@@ -1,0 +1,361 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Receiver File Manager API",
+    "version": "0.1.0",
+    "description": "REST API for Receiver, a portable file manager with chunk upload, trash mode, search, and no database."
+  },
+  "servers": [
+    { "url": "http://localhost:8080", "description": "Local server" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "basicAuth": { "type": "http", "scheme": "basic" },
+      "cookieAuth": { "type": "apiKey", "in": "cookie", "name": "receiver_session" }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } },
+        "required": ["error"]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "username": { "type": "string" },
+          "password": { "type": "string" }
+        },
+        "required": ["username", "password"]
+      },
+      "LoginResponse": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } },
+        "required": ["ok"]
+      },
+      "FileItem": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "kind": { "type": "string", "enum": ["file", "folder"] },
+          "size": { "type": "integer", "format": "uint64" },
+          "modified": { "type": ["string", "null"], "format": "date-time" },
+          "thumbnail": { "type": ["string", "null"] }
+        },
+        "required": ["name", "path", "kind", "size", "modified", "thumbnail"]
+      },
+      "FileListResponse": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/FileItem" } }
+        },
+        "required": ["path", "items"]
+      },
+      "SearchResponse": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/FileItem" } }
+        },
+        "required": ["items"]
+      },
+      "CreateUploadRequest": {
+        "type": "object",
+        "properties": {
+          "path": { "type": ["string", "null"] },
+          "filename": { "type": "string" },
+          "total_size": { "type": "integer", "format": "uint64" },
+          "chunk_size": { "type": "integer", "format": "uint64" },
+          "force": { "type": ["boolean", "null"] },
+          "max_width": { "type": ["integer", "null"], "format": "uint32" },
+          "max_height": { "type": ["integer", "null"], "format": "uint32" }
+        },
+        "required": ["filename", "total_size", "chunk_size"]
+      },
+      "CreateUploadResponse": {
+        "type": "object",
+        "properties": { "upload_id": { "type": "string" } },
+        "required": ["upload_id"]
+      },
+      "UploadStatus": {
+        "type": "object",
+        "properties": {
+          "upload_id": { "type": "string" },
+          "received_chunks": { "type": "array", "items": { "type": "integer", "format": "uint64" } },
+          "complete": { "type": "boolean" }
+        },
+        "required": ["upload_id", "received_chunks", "complete"]
+      },
+      "Settings": {
+        "type": "object",
+        "properties": { "trash_enabled": { "type": "boolean" } },
+        "required": ["trash_enabled"]
+      },
+      "TrashEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "original_path": { "type": "string" },
+          "trash_path": { "type": "string" },
+          "deleted_at": { "type": "string", "format": "date-time" },
+          "kind": { "type": "string", "enum": ["file", "folder"] }
+        },
+        "required": ["id", "original_path", "trash_path", "deleted_at", "kind"]
+      },
+      "TrashListResponse": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/TrashEntry" } }
+        },
+        "required": ["items"]
+      },
+      "RestoreRequest": {
+        "type": "object",
+        "properties": { "id": { "type": "string" } },
+        "required": ["id"]
+      },
+      "OkResponse": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } },
+        "required": ["ok"]
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid credentials",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "Conflict": {
+        "description": "Name or path conflict",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      }
+    }
+  },
+  "security": [{ "basicAuth": [] }, { "cookieAuth": [] }],
+  "paths": {
+    "/api/login": {
+      "post": {
+        "summary": "Login",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Logged in", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "summary": "Logout",
+        "responses": {
+          "200": { "description": "Logged out", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginResponse" } } } }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "summary": "Current user",
+        "responses": {
+          "200": { "description": "Current user" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/files": {
+      "get": {
+        "summary": "List folder contents",
+        "parameters": [{ "name": "path", "in": "query", "schema": { "type": "string", "default": "" } }],
+        "responses": {
+          "200": { "description": "Folder contents", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileListResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "Delete file or folder",
+        "parameters": [{ "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/files/download": {
+      "get": {
+        "summary": "Download file or folder",
+        "parameters": [{ "name": "path", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "File stream or folder ZIP",
+            "content": {
+              "application/octet-stream": { "schema": { "type": "string", "format": "binary" } },
+              "application/zip": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/folders": {
+      "post": {
+        "summary": "Create empty folder",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "force", "in": "query", "schema": { "type": "integer", "enum": [0, 1], "default": 0 } }
+        ],
+        "responses": {
+          "201": { "description": "Folder created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileItem" } } } },
+          "200": { "description": "Folder already existed and force=1" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "summary": "Search files and folders by name",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "path", "in": "query", "schema": { "type": "string", "default": "" } }
+        ],
+        "responses": {
+          "200": { "description": "Search results", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/uploads": {
+      "post": {
+        "summary": "Create chunk upload session",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUploadRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "Upload session created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUploadResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}": {
+      "get": {
+        "summary": "Get upload status",
+        "parameters": [{ "name": "upload_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Upload status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UploadStatus" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "Cancel upload session",
+        "parameters": [{ "name": "upload_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Upload cancelled", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}/chunks/{index}": {
+      "put": {
+        "summary": "Upload one raw chunk",
+        "parameters": [
+          { "name": "upload_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "index", "in": "path", "required": true, "schema": { "type": "integer", "format": "uint64" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+        },
+        "responses": {
+          "200": { "description": "Chunk saved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}/complete": {
+      "post": {
+        "summary": "Complete upload and merge chunks",
+        "parameters": [{ "name": "upload_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "201": { "description": "File saved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileItem" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "summary": "Get settings",
+        "responses": {
+          "200": { "description": "Settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "put": {
+        "summary": "Update settings",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } }
+        },
+        "responses": {
+          "200": { "description": "Settings saved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Settings" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/trash": {
+      "get": {
+        "summary": "List trash",
+        "responses": {
+          "200": { "description": "Trash items", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrashListResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "delete": {
+        "summary": "Delete trash item permanently",
+        "parameters": [{ "name": "id", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Trash item deleted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/trash/restore": {
+      "post": {
+        "summary": "Restore trash item",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RestoreRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Trash item restored", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/thumbnails/{name}": {
+      "get": {
+        "summary": "Get thumbnail",
+        "parameters": [{ "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "JPEG thumbnail", "content": { "image/jpeg": { "schema": { "type": "string", "format": "binary" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  }
+}
