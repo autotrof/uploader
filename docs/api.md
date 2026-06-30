@@ -29,6 +29,8 @@ Importable API docs:
   - Folders are returned as ZIP archives.
 - `DELETE /api/files?path=folder-or-file`
   - Deletes permanently or moves to trash depending on settings.
+- `PUT /api/files/rename`
+  - Body: `{ "path": "folder-or-file", "new_name": "nama-baru.ext" }`
 - `POST /api/folders?path=folder/path&force=0|1`
   - Creates an empty folder.
   - If the folder exists and `force=1`, the request succeeds.
@@ -42,16 +44,52 @@ Importable API docs:
     ```json
     {
       "path": "target/folder",
-      "filename": "photo.jpg",
+      "filename": "video.mp4",
       "total_size": 12345,
       "chunk_size": 5242880,
       "force": false,
-      "max_width": 1920,
-      "max_height": 1080
+      "max_width": null,
+      "max_height": null,
+      "thumbnail_size": 45678,
+      "thumbnail_content_type": "image/jpeg"
     }
     ```
+  - `thumbnail_size` dan `thumbnail_content_type` opsional, hanya untuk upload video.
+- `POST /api/uploads/batch`
+  - Body:
+    ```json
+    {
+      "files": [
+        {
+          "path": "target/folder",
+          "filename": "photo-1.jpg",
+          "total_size": 12345,
+          "chunk_size": 5242880,
+          "force": false,
+          "max_width": null,
+          "max_height": null,
+          "thumbnail_size": 45678,
+          "thumbnail_content_type": "image/jpeg"
+        },
+        {
+          "path": "target/folder",
+          "filename": "photo-2.jpg",
+          "total_size": 67890,
+          "chunk_size": 5242880,
+          "force": false,
+          "max_width": 1920,
+          "max_height": 1080
+        }
+      ]
+    }
+    ```
+  - Returns upload sessions in the same order as the submitted files.
+  - Untuk upload folder dari UI, setiap file dikirim dengan `path` sesuai folder relatifnya.
 - `PUT /api/uploads/{upload_id}/chunks/{index}`
   - Raw chunk bytes.
+- `PUT /api/uploads/{upload_id}/thumbnail`
+  - Raw image bytes untuk thumbnail video opsional.
+  - `Content-Type` harus sama dengan `thumbnail_content_type` saat membuat session upload.
 - `GET /api/uploads/{upload_id}`
   - Returns received chunk indexes for resume.
 - `POST /api/uploads/{upload_id}/complete`

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, File, OpenOptions};
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,6 +26,7 @@ use zip::write::SimpleFileOptions;
 
 const INTERNAL_DIR: &str = ".receiver";
 const THUMBNAIL_MAX: u32 = 128;
+const UPLOAD_THUMBNAIL_MAX_BYTES: usize = 10 * 1024 * 1024;
 const TRASH_RETENTION_DAYS: i64 = 30;
 static FILE_LOGGER: OnceLock<FileLogger> = OnceLock::new();
 
@@ -134,11 +135,23 @@ struct CreateUploadRequest {
     force: Option<bool>,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    thumbnail_size: Option<u64>,
+    thumbnail_content_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateUploadBatchRequest {
+    files: Vec<CreateUploadRequest>,
 }
 
 #[derive(Serialize)]
 struct CreateUploadResponse {
     upload_id: String,
+}
+
+#[derive(Serialize)]
+struct CreateUploadBatchResponse {
+    uploads: Vec<CreateUploadResponse>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -151,6 +164,8 @@ struct UploadSession {
     force: bool,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    thumbnail_size: Option<u64>,
+    thumbnail_content_type: Option<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -159,6 +174,18 @@ struct UploadStatus {
     upload_id: String,
     received_chunks: Vec<u64>,
     complete: bool,
+}
+
+struct ValidatedUploadRequest {
+    path: PathBuf,
+    filename: String,
+    total_size: u64,
+    chunk_size: u64,
+    force: bool,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    thumbnail_size: Option<u64>,
+    thumbnail_content_type: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -183,6 +210,12 @@ struct DeleteTrashQuery {
 #[derive(Deserialize)]
 struct SettingsRequest {
     trash_enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    path: String,
+    new_name: String,
 }
 
 fn json_error(status: actix_web::http::StatusCode, message: impl Into<String>) -> HttpResponse {
@@ -237,6 +270,17 @@ fn display_path(path: &Path) -> String {
 
 fn storage_path(state: &AppState, input: Option<&str>) -> Result<PathBuf, String> {
     Ok(state.storage_root.join(normalize_relative(input)?))
+}
+
+fn validate_name(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+        return Err("Name is invalid".to_string());
+    }
+    if trimmed == INTERNAL_DIR {
+        return Err("Name is invalid".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn ensure_auth(req: &HttpRequest, state: &AppState) -> Result<(), HttpResponse> {
@@ -330,8 +374,12 @@ fn thumbnail_name(relative: &Path) -> String {
     format!("{:x}.jpg", hasher.finalize())
 }
 
+fn thumbnail_file_path(state: &AppState, relative: &Path) -> PathBuf {
+    thumbnails_root(state).join(thumbnail_name(relative))
+}
+
 fn thumbnail_url(relative: &Path, full_path: &Path, state: &AppState) -> Option<String> {
-    if !is_supported_image(full_path) {
+    if !full_path.is_file() {
         return None;
     }
     let name = thumbnail_name(relative);
@@ -376,6 +424,26 @@ fn is_supported_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_supported_video_name(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "mp4" | "m4v" | "mov" | "webm" | "mkv" | "avi"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_supported_video(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(is_supported_video_name)
+        .unwrap_or(false)
+}
+
 fn image_format(path: &Path) -> Option<ImageFormat> {
     match path
         .extension()
@@ -404,12 +472,20 @@ fn process_image(
         return;
     }
     let Ok(mut image) = image::open(path) else {
-        receiver_warn!("Failed to open image for processing: {}", display_path(path));
+        receiver_warn!(
+            "Failed to open image for processing: {}",
+            display_path(path)
+        );
         return;
     };
     if let (Some(width), Some(height)) = (max_width, max_height) {
         if width > 0 && height > 0 && (image.width() > width || image.height() > height) {
-            receiver_info!("Resizing image: {} to {}x{}", display_path(path), width, height);
+            receiver_info!(
+                "Resizing image: {} to {}x{}",
+                display_path(path),
+                width,
+                height
+            );
             image = image.resize(width, height, image::imageops::FilterType::Lanczos3);
             if let Some(format) = image_format(path) {
                 let _ = image.save_with_format(path, format);
@@ -423,6 +499,114 @@ fn process_image(
         ImageFormat::Jpeg,
     );
     receiver_debug!("Generated thumbnail for: {}", display_path(relative));
+}
+
+fn remove_thumbnail(state: &AppState, relative: &Path) {
+    let thumb = thumbnail_file_path(state, relative);
+    if thumb.exists() {
+        let _ = fs::remove_file(thumb);
+    }
+}
+
+fn store_thumbnail_from_image_data(
+    state: &AppState,
+    relative: &Path,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    let image = image::load_from_memory(data).map_err(|_| "Thumbnail image is invalid")?;
+    let thumb = image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX);
+    fs::create_dir_all(thumbnails_root(state)).map_err(|_| "Unable to save thumbnail")?;
+    thumb
+        .save_with_format(thumbnail_file_path(state, relative), ImageFormat::Jpeg)
+        .map_err(|_| "Unable to save thumbnail")?;
+    Ok(())
+}
+
+fn session_thumbnail_path(state: &AppState, upload_id: &str) -> PathBuf {
+    session_dir(state, upload_id).join("thumbnail.bin")
+}
+
+fn update_thumbnail_for_completed_upload(
+    state: &AppState,
+    session: &UploadSession,
+    final_path: &Path,
+    relative: &Path,
+) -> Result<(), &'static str> {
+    if is_supported_image(final_path) {
+        process_image(
+            final_path,
+            relative,
+            state,
+            session.max_width,
+            session.max_height,
+        );
+        return Ok(());
+    }
+    if is_supported_video(final_path) {
+        let thumbnail_path = session_thumbnail_path(state, &session.upload_id);
+        if thumbnail_path.exists() {
+            let data = fs::read(thumbnail_path).map_err(|_| "Unable to read thumbnail")?;
+            return store_thumbnail_from_image_data(state, relative, &data);
+        }
+        remove_thumbnail(state, relative);
+        return Ok(());
+    }
+    remove_thumbnail(state, relative);
+    Ok(())
+}
+
+fn thumbnail_targets_in_tree(state: &AppState, relative: &Path) -> Vec<PathBuf> {
+    let full_path = state.storage_root.join(relative);
+    if !full_path.exists() {
+        return vec![relative.to_path_buf()];
+    }
+    if full_path.is_file() {
+        return vec![relative.to_path_buf()];
+    }
+    let mut targets = Vec::new();
+    for entry in WalkDir::new(&full_path).into_iter().flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
+        let Ok(child_relative) = entry.path().strip_prefix(&state.storage_root) else {
+            continue;
+        };
+        targets.push(child_relative.to_path_buf());
+    }
+    targets
+}
+
+fn collect_thumbnail_move_pairs(
+    state: &AppState,
+    from_relative: &Path,
+    to_relative: &Path,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut pairs = Vec::new();
+    for item in thumbnail_targets_in_tree(state, from_relative) {
+        let Ok(suffix) = item.strip_prefix(from_relative) else {
+            continue;
+        };
+        let from_thumb = thumbnail_file_path(state, &item);
+        if !from_thumb.exists() {
+            continue;
+        }
+        let to_item = to_relative.join(suffix);
+        let to_thumb = thumbnail_file_path(state, &to_item);
+        pairs.push((from_thumb, to_thumb));
+    }
+    pairs
+}
+
+fn remove_thumbnails_for_paths(state: &AppState, items: &[PathBuf]) {
+    for item in items {
+        remove_thumbnail(state, item);
+    }
+}
+
+fn move_thumbnail_pairs(pairs: &[(PathBuf, PathBuf)]) {
+    for (from_thumb, to_thumb) in pairs {
+        let _ = fs::rename(from_thumb, to_thumb);
+    }
 }
 
 fn session_dir(state: &AppState, upload_id: &str) -> PathBuf {
@@ -472,6 +656,115 @@ fn expected_chunk_count(session: &UploadSession) -> u64 {
     } else {
         (session.total_size + session.chunk_size - 1) / session.chunk_size
     }
+}
+
+fn validate_upload_request(
+    payload: &CreateUploadRequest,
+) -> Result<ValidatedUploadRequest, HttpResponse> {
+    if payload.filename.trim().is_empty()
+        || payload.filename.contains('/')
+        || payload.filename.contains('\\')
+    {
+        return Err(json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "File name is invalid",
+        ));
+    }
+    if payload.chunk_size == 0 {
+        return Err(json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Chunk size is invalid",
+        ));
+    }
+    if payload.thumbnail_size == Some(0) {
+        return Err(json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail size is invalid",
+        ));
+    }
+    if payload.thumbnail_size.is_some() && !is_supported_video_name(&payload.filename) {
+        return Err(json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail upload is only supported for video files",
+        ));
+    }
+    if let Some(content_type) = payload.thumbnail_content_type.as_deref() {
+        if payload.thumbnail_size.is_none() {
+            return Err(json_error(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "Thumbnail size is required",
+            ));
+        }
+        if !content_type.to_ascii_lowercase().starts_with("image/") {
+            return Err(json_error(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "Thumbnail content type is invalid",
+            ));
+        }
+    }
+    if payload.thumbnail_size.is_some() && payload.thumbnail_content_type.is_none() {
+        return Err(json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail content type is required",
+        ));
+    }
+    let relative_dir = match normalize_relative(payload.path.as_deref()) {
+        Ok(path) => path,
+        Err(message) => {
+            return Err(json_error(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                message,
+            ))
+        }
+    };
+    Ok(ValidatedUploadRequest {
+        path: relative_dir,
+        filename: payload.filename.clone(),
+        total_size: payload.total_size,
+        chunk_size: payload.chunk_size,
+        force: payload.force.unwrap_or(false),
+        max_width: payload.max_width,
+        max_height: payload.max_height,
+        thumbnail_size: payload.thumbnail_size,
+        thumbnail_content_type: payload.thumbnail_content_type.clone(),
+    })
+}
+
+fn create_upload_session(
+    state: &AppState,
+    request: &ValidatedUploadRequest,
+) -> Result<CreateUploadResponse, HttpResponse> {
+    let upload_id = uuid::Uuid::new_v4().to_string();
+    receiver_info!("Upload session created: {}", upload_id);
+    let session = UploadSession {
+        upload_id: upload_id.clone(),
+        path: display_path(&request.path),
+        filename: request.filename.clone(),
+        total_size: request.total_size,
+        chunk_size: request.chunk_size,
+        force: request.force,
+        max_width: request.max_width,
+        max_height: request.max_height,
+        thumbnail_size: request.thumbnail_size,
+        thumbnail_content_type: request.thumbnail_content_type.clone(),
+        created_at: Utc::now(),
+    };
+    let dir = session_dir(state, &upload_id);
+    if fs::create_dir_all(dir.join("chunks")).is_err()
+        || fs::write(
+            session_meta_path(state, &upload_id),
+            serde_json::to_vec_pretty(&session).unwrap(),
+        )
+        .is_err()
+    {
+        receiver_error!("Failed to create upload session: {}", upload_id);
+        let _ = fs::remove_dir_all(dir);
+        return Err(json_error(
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to create upload session",
+        ));
+    }
+    Ok(CreateUploadResponse { upload_id })
 }
 
 fn cleanup_trash(state: AppState) {
@@ -657,7 +950,11 @@ async fn search_files(
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    receiver_info!("Searching for '{}' in {}", query.q, display_path(&normalize_relative(query.path.as_deref()).unwrap_or_default()));
+    receiver_info!(
+        "Searching for '{}' in {}",
+        query.q,
+        display_path(&normalize_relative(query.path.as_deref()).unwrap_or_default())
+    );
     let base_relative = match normalize_relative(query.path.as_deref()) {
         Ok(path) => path,
         Err(message) => return json_error(actix_web::http::StatusCode::BAD_REQUEST, message),
@@ -701,53 +998,59 @@ async fn create_upload(
         payload.total_size,
         payload.chunk_size
     );
-    if payload.filename.trim().is_empty()
-        || payload.filename.contains('/')
-        || payload.filename.contains('\\')
-    {
+    let request = match validate_upload_request(&payload) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    match create_upload_session(&state, &request) {
+        Ok(response) => HttpResponse::Created().json(response),
+        Err(response) => response,
+    }
+}
+
+#[post("/api/uploads/batch")]
+async fn create_upload_batch(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<CreateUploadBatchRequest>,
+) -> impl Responder {
+    if let Err(response) = ensure_auth(&req, &state) {
+        return response;
+    }
+    if payload.files.is_empty() {
         return json_error(
             actix_web::http::StatusCode::BAD_REQUEST,
-            "File name is invalid",
+            "File list is empty",
         );
     }
-    if payload.chunk_size == 0 {
-        return json_error(
-            actix_web::http::StatusCode::BAD_REQUEST,
-            "Chunk size is invalid",
+    let mut requests = Vec::with_capacity(payload.files.len());
+    for file in &payload.files {
+        receiver_info!(
+            "Create upload in batch: filename={}, path={}, total_size={}, chunk_size={}",
+            file.filename,
+            file.path.as_deref().unwrap_or(""),
+            file.total_size,
+            file.chunk_size
         );
+        let request = match validate_upload_request(file) {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
+        requests.push(request);
     }
-    let relative_dir = match normalize_relative(payload.path.as_deref()) {
-        Ok(path) => path,
-        Err(message) => return json_error(actix_web::http::StatusCode::BAD_REQUEST, message),
-    };
-    let upload_id = uuid::Uuid::new_v4().to_string();
-    receiver_info!("Upload session created: {}", upload_id);
-    let session = UploadSession {
-        upload_id: upload_id.clone(),
-        path: display_path(&relative_dir),
-        filename: payload.filename.clone(),
-        total_size: payload.total_size,
-        chunk_size: payload.chunk_size,
-        force: payload.force.unwrap_or(false),
-        max_width: payload.max_width,
-        max_height: payload.max_height,
-        created_at: Utc::now(),
-    };
-    let dir = session_dir(&state, &upload_id);
-    if fs::create_dir_all(dir.join("chunks")).is_err()
-        || fs::write(
-            session_meta_path(&state, &upload_id),
-            serde_json::to_vec_pretty(&session).unwrap(),
-        )
-        .is_err()
-    {
-        receiver_error!("Failed to create upload session: {}", upload_id);
-        return json_error(
-            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to create upload session",
-        );
+    let mut uploads = Vec::with_capacity(requests.len());
+    for request in &requests {
+        match create_upload_session(&state, request) {
+            Ok(response) => uploads.push(response),
+            Err(response) => {
+                for upload in uploads {
+                    let _ = fs::remove_dir_all(session_dir(&state, &upload.upload_id));
+                }
+                return response;
+            }
+        }
     }
-    HttpResponse::Created().json(CreateUploadResponse { upload_id })
+    HttpResponse::Created().json(CreateUploadBatchResponse { uploads })
 }
 
 #[put("/api/uploads/{upload_id}/chunks/{index}")]
@@ -826,6 +1129,95 @@ async fn put_chunk(
         );
     }
     receiver_debug!("Chunk {} uploaded for {}", index, upload_id);
+    HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+#[put("/api/uploads/{upload_id}/thumbnail")]
+async fn put_upload_thumbnail(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    mut payload: web::Payload,
+) -> impl Responder {
+    if let Err(response) = ensure_auth(&req, &state) {
+        return response;
+    }
+    let upload_id = path.into_inner();
+    let session = match read_upload_session(&state, &upload_id) {
+        Ok(session) => session,
+        Err(response) => return response,
+    };
+    let expected_size = match session.thumbnail_size {
+        Some(size) if size > 0 => size,
+        _ => {
+            return json_error(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "Thumbnail is not expected for this upload",
+            )
+        }
+    };
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let expected_type = session
+        .thumbnail_content_type
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type != expected_type {
+        return json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail content type does not match upload session",
+        );
+    }
+    let thumbnail_path = session_thumbnail_path(&state, &upload_id);
+    let tmp_path = thumbnail_path.with_extension("tmp");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = payload.next().await {
+        match chunk {
+            Ok(chunk) => {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > UPLOAD_THUMBNAIL_MAX_BYTES || bytes.len() as u64 > expected_size {
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return json_error(
+                        actix_web::http::StatusCode::BAD_REQUEST,
+                        "Thumbnail is too large",
+                    );
+                }
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return json_error(
+                    actix_web::http::StatusCode::BAD_REQUEST,
+                    "Thumbnail upload failed",
+                );
+            }
+        }
+    }
+    if bytes.len() as u64 != expected_size {
+        return json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail size does not match upload session",
+        );
+    }
+    if image::load_from_memory(&bytes).is_err() {
+        return json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Thumbnail image is invalid",
+        );
+    }
+    if tokio::fs::write(&tmp_path, &bytes).await.is_err()
+        || tokio::fs::rename(&tmp_path, &thumbnail_path).await.is_err()
+    {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return json_error(
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to save thumbnail",
+        );
+    }
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
 
@@ -936,14 +1328,18 @@ async fn complete_upload(
             "Unable to save file",
         );
     }
-    receiver_info!("Upload completed: {} -> {}", upload_id, display_path(&relative_file));
-    process_image(
-        &final_path,
-        &relative_file,
-        &state,
-        session.max_width,
-        session.max_height,
+    receiver_info!(
+        "Upload completed: {} -> {}",
+        upload_id,
+        display_path(&relative_file)
     );
+    if let Err(message) =
+        update_thumbnail_for_completed_upload(&state, &session, &final_path, &relative_file)
+    {
+        let _ = fs::remove_file(&final_path);
+        let _ = fs::remove_dir_all(session_dir(&state, &upload_id));
+        return json_error(actix_web::http::StatusCode::BAD_REQUEST, message);
+    }
     let _ = fs::remove_dir_all(session_dir(&state, &upload_id));
     HttpResponse::Created().json(file_item(&final_path, &relative_file, &state).ok())
 }
@@ -990,6 +1386,7 @@ async fn delete_file(
             .join("items")
             .join(&id);
         let trash_full = state.storage_root.join(&trash_relative);
+        let thumbnail_moves = collect_thumbnail_move_pairs(&state, &relative, &trash_relative);
         if let Some(parent) = trash_full.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -999,6 +1396,7 @@ async fn delete_file(
                 "Unable to move to trash",
             );
         }
+        move_thumbnail_pairs(&thumbnail_moves);
         let mut entries = read_trash_index(&state);
         entries.push(TrashEntry {
             id,
@@ -1015,12 +1413,14 @@ async fn delete_file(
         let _ = write_trash_index(&state, &entries);
     } else if full_path.is_dir() {
         receiver_info!("Permanently deleting folder: {}", display_path(&relative));
+        let thumbnail_paths = thumbnail_targets_in_tree(&state, &relative);
         if fs::remove_dir_all(full_path).is_err() {
             return json_error(
                 actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to delete folder",
             );
         }
+        remove_thumbnails_for_paths(&state, &thumbnail_paths);
     } else {
         receiver_info!("Permanently deleting file: {}", display_path(&relative));
         if fs::remove_file(full_path).is_err() {
@@ -1029,8 +1429,54 @@ async fn delete_file(
                 "Unable to delete file",
             );
         }
+        remove_thumbnail(&state, &relative);
     }
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
+}
+
+#[put("/api/files/rename")]
+async fn rename_file(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<RenameRequest>,
+) -> impl Responder {
+    if let Err(response) = ensure_auth(&req, &state) {
+        return response;
+    }
+    let relative = match normalize_relative(Some(&payload.path)) {
+        Ok(path) if !path.as_os_str().is_empty() => path,
+        Ok(_) => return json_error(actix_web::http::StatusCode::BAD_REQUEST, "Path is required"),
+        Err(message) => return json_error(actix_web::http::StatusCode::BAD_REQUEST, message),
+    };
+    let new_name = match validate_name(&payload.new_name) {
+        Ok(name) => name,
+        Err(message) => return json_error(actix_web::http::StatusCode::BAD_REQUEST, message),
+    };
+    let full_path = state.storage_root.join(&relative);
+    if !full_path.exists() {
+        return json_error(actix_web::http::StatusCode::NOT_FOUND, "Path was not found");
+    }
+    let parent = match relative.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => PathBuf::new(),
+    };
+    let target_relative = parent.join(&new_name);
+    if target_relative == relative {
+        return HttpResponse::Ok().json(file_item(&full_path, &relative, &state).ok());
+    }
+    let target_full = state.storage_root.join(&target_relative);
+    if target_full.exists() {
+        return json_error(actix_web::http::StatusCode::CONFLICT, "Name already exists");
+    }
+    let thumbnail_moves = collect_thumbnail_move_pairs(&state, &relative, &target_relative);
+    if fs::rename(&full_path, &target_full).is_err() {
+        return json_error(
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to rename item",
+        );
+    }
+    move_thumbnail_pairs(&thumbnail_moves);
+    HttpResponse::Ok().json(file_item(&target_full, &target_relative, &state).ok())
 }
 
 #[get("/api/files/download")]
@@ -1178,7 +1624,11 @@ async fn restore_trash(
         );
     };
     let entry = entries.remove(pos);
-    receiver_info!("Restoring trash item: {} -> {}", entry.id, entry.original_path);
+    receiver_info!(
+        "Restoring trash item: {} -> {}",
+        entry.id,
+        entry.original_path
+    );
     let source = state.storage_root.join(&entry.trash_path);
     let target = match storage_path(&state, Some(&entry.original_path)) {
         Ok(path) => path,
@@ -1190,6 +1640,11 @@ async fn restore_trash(
             "Original path already exists",
         );
     }
+    let thumbnail_moves = collect_thumbnail_move_pairs(
+        &state,
+        Path::new(&entry.trash_path),
+        Path::new(&entry.original_path),
+    );
     if let Some(parent) = target.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -1199,6 +1654,7 @@ async fn restore_trash(
             "Unable to restore item",
         );
     }
+    move_thumbnail_pairs(&thumbnail_moves);
     let _ = write_trash_index(&state, &entries);
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
@@ -1221,7 +1677,9 @@ async fn delete_trash(
     };
     let entry = entries.remove(pos);
     receiver_info!("Permanently deleting trash item: {}", entry.id);
-    let full_path = state.storage_root.join(entry.trash_path);
+    let full_path = state.storage_root.join(&entry.trash_path);
+    let trash_relative = PathBuf::from(&entry.trash_path);
+    let thumbnail_paths = thumbnail_targets_in_tree(&state, &trash_relative);
     let result = if full_path.is_dir() {
         fs::remove_dir_all(full_path)
     } else {
@@ -1233,6 +1691,7 @@ async fn delete_trash(
             "Unable to delete trash item",
         );
     }
+    remove_thumbnails_for_paths(&state, &thumbnail_paths);
     let _ = write_trash_index(&state, &entries);
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
 }
@@ -1333,7 +1792,7 @@ impl FileLogger {
             .append(true)
             .open(log_dir.join(format!("receiver-{current_date}.log")))
     }
-    
+
     fn enabled(&self, level: Level) -> bool {
         self.level >= level.to_level_filter()
     }
@@ -1363,14 +1822,7 @@ impl FileLogger {
         }
 
         if let Some(file) = state.file.as_mut() {
-            let _ = writeln!(
-                file,
-                "{} {:<5} [{}] {}",
-                timestamp,
-                level,
-                target,
-                message
-            );
+            let _ = writeln!(file, "{} {:<5} [{}] {}", timestamp, level, target, message);
             let _ = file.flush();
         }
     }
@@ -1461,11 +1913,14 @@ async fn main() -> std::io::Result<()> {
             .service(create_folder)
             .service(search_files)
             .service(create_upload)
+            .service(create_upload_batch)
             .service(put_chunk)
+            .service(put_upload_thumbnail)
             .service(get_upload)
             .service(complete_upload)
             .service(cancel_upload)
             .service(delete_file)
+            .service(rename_file)
             .service(download)
             .service(get_settings)
             .service(put_settings)
@@ -1510,6 +1965,8 @@ mod tests {
             force: false,
             max_width: None,
             max_height: None,
+            thumbnail_size: None,
+            thumbnail_content_type: None,
             created_at: Utc::now(),
         };
         assert_eq!(expected_chunk_count(&session), 3);

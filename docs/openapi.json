@@ -68,7 +68,9 @@
           "chunk_size": { "type": "integer", "format": "uint64" },
           "force": { "type": ["boolean", "null"] },
           "max_width": { "type": ["integer", "null"], "format": "uint32" },
-          "max_height": { "type": ["integer", "null"], "format": "uint32" }
+          "max_height": { "type": ["integer", "null"], "format": "uint32" },
+          "thumbnail_size": { "type": ["integer", "null"], "format": "uint64" },
+          "thumbnail_content_type": { "type": ["string", "null"] }
         },
         "required": ["filename", "total_size", "chunk_size"]
       },
@@ -76,6 +78,20 @@
         "type": "object",
         "properties": { "upload_id": { "type": "string" } },
         "required": ["upload_id"]
+      },
+      "CreateUploadBatchRequest": {
+        "type": "object",
+        "properties": {
+          "files": { "type": "array", "items": { "$ref": "#/components/schemas/CreateUploadRequest" } }
+        },
+        "required": ["files"]
+      },
+      "CreateUploadBatchResponse": {
+        "type": "object",
+        "properties": {
+          "uploads": { "type": "array", "items": { "$ref": "#/components/schemas/CreateUploadResponse" } }
+        },
+        "required": ["uploads"]
       },
       "UploadStatus": {
         "type": "object",
@@ -113,6 +129,14 @@
         "type": "object",
         "properties": { "id": { "type": "string" } },
         "required": ["id"]
+      },
+      "RenameRequest": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "new_name": { "type": "string" }
+        },
+        "required": ["path", "new_name"]
       },
       "OkResponse": {
         "type": "object",
@@ -205,6 +229,21 @@
         }
       }
     },
+    "/api/files/rename": {
+      "put": {
+        "summary": "Rename file or folder",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Renamed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileItem" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/api/folders": {
       "post": {
         "summary": "Create empty folder",
@@ -246,6 +285,19 @@
         }
       }
     },
+    "/api/uploads/batch": {
+      "post": {
+        "summary": "Create chunk upload sessions for many files",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUploadBatchRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "Upload sessions created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateUploadBatchResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/api/uploads/{upload_id}": {
       "get": {
         "summary": "Get upload status",
@@ -278,6 +330,25 @@
         },
         "responses": {
           "200": { "description": "Chunk saved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}/thumbnail": {
+      "put": {
+        "summary": "Upload optional video thumbnail",
+        "parameters": [{ "name": "upload_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": { "schema": { "type": "string", "format": "binary" } },
+            "image/png": { "schema": { "type": "string", "format": "binary" } },
+            "image/webp": { "schema": { "type": "string", "format": "binary" } }
+          }
+        },
+        "responses": {
+          "200": { "description": "Thumbnail saved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OkResponse" } } } },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }
         }

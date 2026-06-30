@@ -237,6 +237,33 @@ button,
   gap: 8px;
 }
 
+.breadcrumb {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  overflow-x: auto;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.breadcrumb button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  color: #4b5563;
+  background: transparent;
+}
+
+.breadcrumb button:hover,
+.breadcrumb button.active {
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
 .search-bar {
   justify-content: flex-start;
   color: #6b7280;
@@ -255,6 +282,40 @@ button,
 
 .panel {
   padding: 16px;
+}
+
+.dropzone {
+  position: relative;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.dropzone.active {
+  border-color: #60a5fa;
+  background: #f8fbff;
+}
+
+.dropzone-callout {
+  margin-bottom: 14px;
+  padding: 18px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px dashed #93c5fd;
+  border-radius: 12px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  cursor: pointer;
+  text-align: center;
+}
+
+.dropzone-callout input {
+  display: none;
+}
+
+.dropzone-callout span {
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .panel-head {
@@ -276,13 +337,32 @@ button,
 
 .item-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px auto;
+  grid-template-columns: 28px minmax(0, 1fr) 150px auto;
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid #f1f5f9;
   border-radius: 12px;
   background: #f8fafc;
+}
+
+.item-check,
+.check-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.item-check input,
+.check-all input {
+  width: 16px;
+  min-height: 16px;
+  margin: 0;
+}
+
+.check-all span {
+  font-size: 13px;
+  color: #4b5563;
 }
 
 .item-main {
@@ -375,13 +455,18 @@ button,
 
 .progress {
   display: grid;
-  grid-template-columns: minmax(120px, 220px) 1fr 44px;
+  grid-template-columns: minmax(120px, 220px) 1fr 56px 34px;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid #bfdbfe;
   border-radius: 12px;
   background: #eff6ff;
+}
+
+.upload-list {
+  display: grid;
+  gap: 8px;
 }
 
 .progress span,
@@ -400,6 +485,32 @@ button,
   display: block;
   height: 100%;
   background: #2563eb;
+}
+
+.progress.done {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.progress.cancelled,
+.progress.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.progress.preparing,
+.progress.retrying {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.progress-close {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  color: #475569;
+  background: transparent;
 }
 
 .toast {
@@ -508,22 +619,45 @@ button,
     justify-content: stretch;
   }
 
+  .breadcrumb {
+    padding-bottom: 2px;
+  }
+
   .toolbar-left button,
   .toolbar-right button,
   .upload-inline {
     width: 100%;
   }
 
+  .dropzone-callout {
+    flex-direction: column;
+  }
+
   .item-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: 28px minmax(0, 1fr);
   }
 
   .item-meta {
+    grid-column: 2;
     text-align: left;
   }
 
   .row-actions {
+    grid-column: 2;
     justify-content: flex-start;
+  }
+
+  .panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .progress {
+    grid-template-columns: 1fr 56px 34px;
+  }
+
+  .progress span {
+    grid-column: 1 / -1;
   }
 
   .topbar {
