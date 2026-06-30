@@ -35,6 +35,15 @@ select_cargo_command() {
                 return 1
             fi
             ;;
+        "x86_64-unknown-linux-musl")
+            if has_command "x86_64-linux-musl-gcc"; then
+                echo "cargo build"
+            elif has_command "cargo-zigbuild" && has_command "zig"; then
+                echo "cargo zigbuild"
+            else
+                return 1
+            fi
+            ;;
         *)
             echo "cargo build"
             ;;
