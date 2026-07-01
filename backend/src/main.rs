@@ -314,6 +314,50 @@ fn ensure_auth(req: &HttpRequest, state: &AppState) -> Result<(), HttpResponse> 
     Err(unauthorized())
 }
 
+fn route_param(req: &HttpRequest, name: &str) -> Result<String, HttpResponse> {
+    req.match_info()
+        .get(name)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            json_error(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "Request path is invalid",
+            )
+        })
+}
+
+fn route_param_u64(req: &HttpRequest, name: &str) -> Result<u64, HttpResponse> {
+    let value = route_param(req, name)?;
+    value.parse().map_err(|_| {
+        json_error(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "Request path is invalid",
+        )
+    })
+}
+
+fn request_base_path(req: &HttpRequest) -> String {
+    let path = req.path();
+    if path == "/api" || path.starts_with("/api/") {
+        return "/".to_string();
+    }
+    if let Some((base, _)) = path.split_once("/api/") {
+        return if base.is_empty() {
+            "/".to_string()
+        } else {
+            base.to_string()
+        };
+    }
+    if let Some(base) = path.strip_suffix("/api") {
+        return if base.is_empty() {
+            "/".to_string()
+        } else {
+            base.to_string()
+        };
+    }
+    "/".to_string()
+}
+
 fn settings_path(state: &AppState) -> PathBuf {
     state.internal_root.join("settings.json")
 }
@@ -789,7 +833,11 @@ fn cleanup_trash(state: AppState) {
 }
 
 #[post("/api/login")]
-async fn login(state: web::Data<AppState>, payload: web::Json<LoginRequest>) -> impl Responder {
+async fn login(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<LoginRequest>,
+) -> impl Responder {
     receiver_info!("Login attempt for user: {}", payload.username);
     if payload.username != state.username || payload.password != state.password {
         receiver_warn!("Login failed for user: {}", payload.username);
@@ -814,7 +862,7 @@ async fn login(state: web::Data<AppState>, payload: web::Json<LoginRequest>) -> 
     HttpResponse::Ok()
         .cookie(
             Cookie::build("receiver_session", token)
-                .path("/")
+                .path(request_base_path(&req))
                 .http_only(true)
                 .same_site(actix_web::cookie::SameSite::Lax)
                 .finish(),
@@ -833,7 +881,7 @@ async fn logout(req: HttpRequest, state: web::Data<AppState>) -> impl Responder 
     HttpResponse::Ok()
         .cookie(
             Cookie::build("receiver_session", "")
-                .path("/")
+                .path(request_base_path(&req))
                 .http_only(true)
                 .max_age(CookieDuration::seconds(0))
                 .finish(),
@@ -1057,13 +1105,19 @@ async fn create_upload_batch(
 async fn put_chunk(
     req: HttpRequest,
     state: web::Data<AppState>,
-    path: web::Path<(String, u64)>,
     mut payload: web::Payload,
 ) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let (upload_id, index) = path.into_inner();
+    let upload_id = match route_param(&req, "upload_id") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let index = match route_param_u64(&req, "index") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     receiver_info!("Uploading chunk {} for upload {}", index, upload_id);
     let session = match read_upload_session(&state, &upload_id) {
         Ok(session) => session,
@@ -1136,13 +1190,15 @@ async fn put_chunk(
 async fn put_upload_thumbnail(
     req: HttpRequest,
     state: web::Data<AppState>,
-    path: web::Path<String>,
     mut payload: web::Payload,
 ) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let upload_id = path.into_inner();
+    let upload_id = match route_param(&req, "upload_id") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let session = match read_upload_session(&state, &upload_id) {
         Ok(session) => session,
         Err(response) => return response,
@@ -1222,15 +1278,14 @@ async fn put_upload_thumbnail(
 }
 
 #[get("/api/uploads/{upload_id}")]
-async fn get_upload(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn get_upload(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let upload_id = path.into_inner();
+    let upload_id = match route_param(&req, "upload_id") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let session = match read_upload_session(&state, &upload_id) {
         Ok(session) => session,
         Err(response) => return response,
@@ -1248,15 +1303,14 @@ async fn get_upload(
 }
 
 #[post("/api/uploads/{upload_id}/complete")]
-async fn complete_upload(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn complete_upload(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let upload_id = path.into_inner();
+    let upload_id = match route_param(&req, "upload_id") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     receiver_info!("Completing upload: {}", upload_id);
     let session = match read_upload_session(&state, &upload_id) {
         Ok(session) => session,
@@ -1345,15 +1399,14 @@ async fn complete_upload(
 }
 
 #[delete("/api/uploads/{upload_id}")]
-async fn cancel_upload(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn cancel_upload(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let upload_id = path.into_inner();
+    let upload_id = match route_param(&req, "upload_id") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     receiver_info!("Cancelling upload: {}", upload_id);
     let _ = fs::remove_dir_all(session_dir(&state, &upload_id));
     HttpResponse::Ok().json(serde_json::json!({ "ok": true }))
@@ -1697,15 +1750,14 @@ async fn delete_trash(
 }
 
 #[get("/api/thumbnails/{name}")]
-async fn get_thumbnail(
-    req: HttpRequest,
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn get_thumbnail(req: HttpRequest, state: web::Data<AppState>) -> impl Responder {
     if let Err(response) = ensure_auth(&req, &state) {
         return response;
     }
-    let name = path.into_inner();
+    let name = match route_param(&req, "name") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if name.contains('/') || name.contains('\\') || !name.ends_with(".jpg") {
         return json_error(
             actix_web::http::StatusCode::BAD_REQUEST,
@@ -1730,18 +1782,55 @@ async fn get_thumbnail(
 }
 
 async fn spa(req: HttpRequest) -> impl Responder {
-    let mut path = req.path().trim_start_matches('/');
-    if path.is_empty() {
-        path = "index.html";
-    }
-    let asset = Frontend::get(path).or_else(|| Frontend::get("index.html"));
-    match asset {
-        Some(content) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            HttpResponse::Ok()
-                .insert_header((header::CONTENT_TYPE, mime.to_string()))
-                .body(content.data.into_owned())
+    let requested = req.path().trim_start_matches('/');
+    if !requested.is_empty()
+        && !requested.ends_with('/')
+        && !requested.contains("/api/")
+        && !requested.rsplit('/').next().unwrap_or("").contains('.')
+        && Frontend::get(requested).is_none()
+    {
+        let mut location = format!("{}/", req.path());
+        if !req.query_string().is_empty() {
+            location.push('?');
+            location.push_str(req.query_string());
         }
+        return HttpResponse::PermanentRedirect()
+            .insert_header((header::LOCATION, location))
+            .finish();
+    }
+
+    let mut candidates = Vec::new();
+    if requested.is_empty() {
+        candidates.push("index.html".to_string());
+    } else {
+        candidates.push(requested.to_string());
+        if let Some(index) = requested.find("assets/") {
+            candidates.push(requested[index..].to_string());
+        }
+        if let Some((_, rest)) = requested.split_once('/') {
+            candidates.push(if rest.is_empty() {
+                "index.html".to_string()
+            } else {
+                rest.to_string()
+            });
+        } else {
+            candidates.push("index.html".to_string());
+        }
+    }
+
+    for path in candidates {
+        if let Some(content) = Frontend::get(&path) {
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            return HttpResponse::Ok()
+                .insert_header((header::CONTENT_TYPE, mime.to_string()))
+                .body(content.data.into_owned());
+        }
+    }
+
+    match Frontend::get("index.html") {
+        Some(content) => HttpResponse::Ok()
+            .insert_header((header::CONTENT_TYPE, "text/html"))
+            .body(content.data.into_owned()),
         None => HttpResponse::NotFound().finish(),
     }
 }
@@ -1887,6 +1976,31 @@ fn build_state() -> std::io::Result<AppState> {
     Ok(state)
 }
 
+fn configure_api(cfg: &mut web::ServiceConfig) {
+    cfg.service(login)
+        .service(logout)
+        .service(me)
+        .service(list_files)
+        .service(create_folder)
+        .service(search_files)
+        .service(create_upload)
+        .service(create_upload_batch)
+        .service(put_chunk)
+        .service(put_upload_thumbnail)
+        .service(get_upload)
+        .service(complete_upload)
+        .service(cancel_upload)
+        .service(delete_file)
+        .service(rename_file)
+        .service(download)
+        .service(get_settings)
+        .service(put_settings)
+        .service(list_trash)
+        .service(restore_trash)
+        .service(delete_trash)
+        .service(get_thumbnail);
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
@@ -1906,28 +2020,8 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(state.clone()))
-            .service(login)
-            .service(logout)
-            .service(me)
-            .service(list_files)
-            .service(create_folder)
-            .service(search_files)
-            .service(create_upload)
-            .service(create_upload_batch)
-            .service(put_chunk)
-            .service(put_upload_thumbnail)
-            .service(get_upload)
-            .service(complete_upload)
-            .service(cancel_upload)
-            .service(delete_file)
-            .service(rename_file)
-            .service(download)
-            .service(get_settings)
-            .service(put_settings)
-            .service(list_trash)
-            .service(restore_trash)
-            .service(delete_trash)
-            .service(get_thumbnail)
+            .configure(configure_api)
+            .service(web::scope("/{mount}").configure(configure_api))
             .default_service(web::get().to(spa))
     })
     .bind(bind)?

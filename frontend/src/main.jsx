@@ -28,8 +28,18 @@ const VIDEO_THUMBNAIL_TIME = 1;
 const VIDEO_THUMBNAIL_MAX_EDGE = 512;
 const OVERWRITE_CONFIRMED = 'overwrite_confirmed';
 
+function appBasePath() {
+  const path = window.location.pathname.replace(/\/+$/, '');
+  return path === '/' ? '' : path;
+}
+
+function appUrl(path) {
+  if (!path.startsWith('/')) return path;
+  return `${appBasePath()}${path}`;
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appUrl(path), {
     credentials: 'include',
     headers: {
       ...(options.body instanceof Blob ? {} : { 'Content-Type': 'application/json' }),
@@ -149,7 +159,7 @@ async function createVideoThumbnail(file) {
 }
 
 function itemIcon(item, size = 20) {
-  if (item.thumbnail) return <img src={item.thumbnail} alt="" className="item-thumb" />;
+  if (item.thumbnail) return <img src={appUrl(item.thumbnail)} alt="" className="item-thumb" />;
   if (item.kind === 'folder') return <Folder className="folder-glyph" size={size} />;
   if (item.name.toLowerCase().endsWith('.xlsx')) return <FileSpreadsheet className="sheet-glyph" size={size} />;
   if (item.name.toLowerCase().endsWith('.zip')) return <FileText className="doc-glyph" size={size} />;
@@ -375,7 +385,7 @@ function App() {
   }
 
   function downloadItem(item) {
-    window.location.href = `/api/files/download?path=${encodeURIComponent(item.path)}`;
+    window.location.href = appUrl(`/api/files/download?path=${encodeURIComponent(item.path)}`);
   }
 
   function toggleSelectedPath(itemPath) {
